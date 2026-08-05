@@ -1,0 +1,23 @@
+[package]
+name = "dualsense-xplane"
+version = "0.1.0"
+edition = "2021"
+description = "X-Plane 12 -> DualSense haptics daemon (runway rumble, touchdown thump, stall buffet, turbulence)"
+authors = ["Abdullah Waqar"]
+
+[[bin]]
+name = "dualsense-xplane"
+path = "src/main.rs"
+
+[dependencies]
+hidapi = { version = "2.6", default-features = false, features = ["linux-static-hidraw"] }
+crc32fast = "1.4"
+serde = { version = "1", features = ["derive"] }
+toml = "0.5"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+ctrlc = "3.4"
+
+[profile.release]
+opt-level = 2

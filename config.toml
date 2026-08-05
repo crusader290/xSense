@@ -1,0 +1,36 @@
+# dualsense-xplane configuration
+# Copy/edit this next to the binary, or pass a path as the first CLI arg:
+#   ./dualsense-xplane /path/to/config.toml
+
+# IP/port X-Plane 12 is listening on for UDP dataref requests.
+# 127.0.0.1 if X-Plane runs on the same machine as this daemon.
+xplane_ip = "127.0.0.1"
+xplane_port = 49000
+
+# Local UDP port this daemon binds to receive RREF responses.
+# NOTE: X-Plane itself binds a wide range of UDP ports on startup (multiplayer,
+# # BECN discovery, etc). If you get "Address already in use", check
+# `sudo lsof -i UDP | grep -i main` for X-Plane's claimed ports and pick
+# something outside that range.
+local_port = 52010
+
+# "bluetooth" | "usb" | "auto"
+# Bluetooth is prioritized per project scope; falls back to whatever hidapi
+# finds if the preferred transport isn't present. "auto" just takes the
+# first DualSense found, whichever transport it's on.
+connection = "bluetooth"
+
+# Effect mixer tick rate. 60 Hz matches typical HID polling; the DualSense's
+# actuators can't usefully resolve much faster than this anyway.
+tick_hz = 60
+
+[gains]
+ground_rumble = 0.35   # runway/taxiway rumble, scales with groundspeed (silent below ~6kt)
+touchdown = 1.0        # one-shot thump on touchdown, scales with VS + g-spike
+stall_buffet = 0.8     # buffet only within ~2deg of stall AoA, or stall-warning active
+turbulence = 0.5       # g_nrml deviation from 1.0, with a deadband for normal sim jitter
+overspeed = 0.9        # discrete buzz when over_vne is active
+gear_flap = 0.4        # bump on gear/flap position change
+engine_rumble = 0.0    # OFF by default -- constant idle hum reads as "broken controller,"
+                       # not immersive. Set > 0 only if you specifically want it; it's
+                       # gated to N1 > 60% so it won't hum at idle even when enabled.

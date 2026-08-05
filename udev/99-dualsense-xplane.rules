@@ -1,0 +1,13 @@
+# Grants group-based hidraw access to the PS5 DualSense (and DualSense Edge)
+# controller, over both USB and Bluetooth, so dualsense-xplane can write HID
+# output reports without running as root.
+
+# --- USB: DualSense (054c:0ce6) ---
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ce6", MODE="0660", GROUP="dualsense"
+
+# --- USB: DualSense Edge (054c:0df2) ---
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0df2", MODE="0660", GROUP="dualsense"
+
+# --- Bluetooth: DualSense / Edge ---
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="*054C:0CE6*", MODE="0660", GROUP="dualsense"
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", KERNELS=="*054C:0DF2*", MODE="0660", GROUP="dualsense"
