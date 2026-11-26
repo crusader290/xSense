@@ -68,6 +68,8 @@ Notes:
 - No drivers or admin rights needed; it uses the standard Windows HID API.
 - If it says the controller can't be opened, another app is holding it exclusively. Common culprits are DS4Windows/DSX with HidHide (whitelist `dualsense-xplane.exe` or close them) and Steam with PlayStation controller support enabled for X-Plane.
 - `set RUST_LOG=debug` before running for per-dataref and per-report detail.
+- `dualsense-xplane.exe --test` checks the controller without X-Plane: lightbar, each motor, then R2/L2 resistance and trigger vibration, about 2.5 s each.
+- If the log says it's waiting for X-Plane, check X-Plane's Settings → Network: "Accept incoming connections" must be on, and the legacy receive port must be 49000.
 
 ## Build
 

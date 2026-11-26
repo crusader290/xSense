@@ -1,6 +1,6 @@
 [package]
 name = "dualsense-xplane"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "X-Plane 12 -> DualSense haptics daemon for Linux and Windows (rumble, adaptive triggers, lightbar)"
 authors = ["Abdullah Waqar"]

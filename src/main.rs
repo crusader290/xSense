@@ -19,7 +19,9 @@ use xplane::XPlaneClient;
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let config_path = Config::resolve_path(std::env::args().nth(1).map(PathBuf::from));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let test_mode = args.iter().any(|a| a == "--test");
+    let config_path = Config::resolve_path(args.iter().find(|a| !a.starts_with("--")).map(PathBuf::from));
     log::info!("config path: {}", config_path.display());
     let config = Config::load(&config_path)?;
     log::info!("loaded config: {config:?}");
@@ -42,6 +44,10 @@ fn main() -> Result<()> {
     };
     let mut pad = DualSense::open(&api, prefer)?;
     log::info!("connected to DualSense over {:?}", pad.connection);
+
+    if test_mode {
+        return controller_self_test(&mut pad);
+    }
 
     // --- X-Plane: subscribe to all datarefs we care about -------------------
     let xp = Arc::new(XPlaneClient::new(
@@ -148,5 +154,47 @@ fn main() -> Result<()> {
     let release = config.triggers.enabled.then_some(TriggerEffect::Off);
     let _ = pad.write(OutputState::default(), release, release);
     log::info!("shut down cleanly");
+    Ok(())
+}
+
+/// `--test`: exercise every output without X-Plane, so a user can tell a
+/// controller-side problem from an X-Plane/network one.
+fn controller_self_test(pad: &mut DualSense) -> Result<()> {
+    let steps: [(&str, OutputState, Option<TriggerEffect>, Option<TriggerEffect>); 6] = [
+        ("lightbar red", OutputState { lightbar: (255, 0, 0), player_leds: 0b00100, ..Default::default() }, None, None),
+        ("left (heavy) motor", OutputState { motor_left: 200, lightbar: (0, 255, 0), player_leds: 0b01010, ..Default::default() }, None, None),
+        ("right (light) motor", OutputState { motor_right: 200, lightbar: (0, 0, 255), player_leds: 0b10001, ..Default::default() }, None, None),
+        (
+            "R2 resistance - pull it",
+            OutputState { lightbar: (255, 255, 0), player_leds: 0b00100, ..Default::default() },
+            Some(TriggerEffect::Feedback { start: 2, strength: 8 }),
+            Some(TriggerEffect::Off),
+        ),
+        (
+            "L2 resistance - pull it",
+            OutputState { lightbar: (0, 255, 255), player_leds: 0b00100, ..Default::default() },
+            Some(TriggerEffect::Off),
+            Some(TriggerEffect::Feedback { start: 2, strength: 8 }),
+        ),
+        (
+            "both triggers vibrating",
+            OutputState { lightbar: (255, 0, 255), player_leds: 0b11111, ..Default::default() },
+            Some(TriggerEffect::Vibration { start: 0, amplitude: 8, frequency: 20 }),
+            Some(TriggerEffect::Vibration { start: 0, amplitude: 8, frequency: 20 }),
+        ),
+    ];
+    for (name, out, rt, lt) in steps {
+        log::info!("self-test: {name}");
+        // Re-send for ~2.5s, like the real loop does at 60 Hz.
+        for _ in 0..150 {
+            if let Err(e) = pad.write(out, rt, lt) {
+                log::error!("self-test write failed: {e:#}");
+                return Err(e);
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+    }
+    pad.write(OutputState::default(), Some(TriggerEffect::Off), Some(TriggerEffect::Off))?;
+    log::info!("self-test done");
     Ok(())
 }
