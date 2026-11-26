@@ -85,6 +85,12 @@ impl XPlaneClient {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
                 return Ok(vec![]);
             }
+            // Windows reports an ICMP "port unreachable" from an earlier
+            // send_to (X-Plane not listening yet) as WSAECONNRESET on the
+            // next recv. It's not fatal for UDP; treat it as "no data".
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                return Ok(vec![]);
+            }
             Err(e) => return Err(e).context("UDP recv_from failed"),
         };
 

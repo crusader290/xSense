@@ -13,7 +13,7 @@ use state::FlightState;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use xplane::XPlaneClient;
 
 fn main() -> Result<()> {
@@ -62,15 +62,28 @@ fn main() -> Result<()> {
     let flight_state = Arc::new(Mutex::new(FlightState::new()));
 
     // --- UDP receive thread: keep flight_state fresh ------------------------
+    // X-Plane forgets RREF subscriptions when it restarts, and never sees
+    // them if it wasn't listening when we started, so re-send them every
+    // RESUBSCRIBE_EVERY until data flows again.
     {
         let xp = xp.clone();
+        let subs = subs.clone();
         let flight_state = flight_state.clone();
         let running = running.clone();
         std::thread::spawn(move || {
+            const RESUBSCRIBE_EVERY: Duration = Duration::from_secs(2);
+            let mut last_rx: Option<Instant> = None;
+            let mut last_sub = Instant::now();
+            let mut waiting_logged = false;
             while running.load(Ordering::SeqCst) {
                 match xp.recv() {
                     Ok(pairs) => {
                         if !pairs.is_empty() {
+                            if last_rx.is_none() || waiting_logged {
+                                log::info!("receiving data from X-Plane");
+                                waiting_logged = false;
+                            }
+                            last_rx = Some(Instant::now());
                             let mut fs = flight_state.lock().unwrap();
                             for (idx, val) in pairs {
                                 fs.apply(idx, val);
@@ -78,9 +91,21 @@ fn main() -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        log::warn!("xplane recv error: {e}");
+                        log::warn!("xplane recv error: {e:#}");
                         std::thread::sleep(Duration::from_millis(200));
                     }
+                }
+
+                let silent = last_rx.is_none_or(|t| t.elapsed() > RESUBSCRIBE_EVERY);
+                if silent && last_sub.elapsed() > RESUBSCRIBE_EVERY {
+                    if !waiting_logged {
+                        log::info!("waiting for X-Plane (is it running with a flight loaded?) - resubscribing every {}s", RESUBSCRIBE_EVERY.as_secs());
+                        waiting_logged = true;
+                    }
+                    if let Err(e) = xp.subscribe_all(&subs) {
+                        log::debug!("resubscribe failed: {e:#}");
+                    }
+                    last_sub = Instant::now();
                 }
             }
         });
@@ -111,7 +136,7 @@ fn main() -> Result<()> {
                 consecutive_failures += 1;
                 // Don't spam 60 warnings/s if the pad is disconnected.
                 if consecutive_failures == 1 || consecutive_failures.is_multiple_of(300) {
-                    log::warn!("hid write failed ({consecutive_failures}x): {e}");
+                    log::warn!("hid write failed ({consecutive_failures}x): {e:#}");
                 }
             }
         }
