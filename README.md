@@ -60,7 +60,7 @@ Upstream rumble effects were tested against real hardware over Bluetooth on Linu
 
 ## Windows
 
-1. Download `dualsense-xplane-<version>-windows-x64.zip` from [Releases](../../releases) and unzip it anywhere.
+1. Download `xsense-v<version>-windows-x64.zip` from [Releases](../../releases) and unzip it anywhere.
 2. Pair the DualSense over Bluetooth (Settings → Bluetooth & devices → hold **PS + Create** until the light flashes) or plug it in with USB.
 3. Start X-Plane 12, then run `dualsense-xplane.exe`. It reads `config.toml` from the same folder. If Windows Firewall asks, allow it on private networks: it only talks UDP to X-Plane.
 
@@ -75,7 +75,7 @@ Notes:
 cargo build --release
 ```
 
-Linux needs `libudev-dev` (Debian/Ubuntu) for the hidapi build. On Windows, a plain `cargo build --release` with the MSVC toolchain works; the C runtime is statically linked (`.cargo/config.toml`), so the `.exe` has no runtime dependencies. Pushing a `v*` tag runs `.github/workflows/release.yml`, which tests on Linux and Windows and publishes the Windows zip as a GitHub release.
+Linux needs `libudev-dev` (Debian/Ubuntu) for the hidapi build. On Windows, a plain `cargo build --release` with the MSVC toolchain works; the C runtime is statically linked (`.cargo/config.toml`), so the `.exe` has no runtime dependencies. Every push to `main` runs `.github/workflows/release.yml`, which tests on Linux and Windows. If no release exists yet for the `version` in `Cargo.toml`, it tags that commit `v<version>` and publishes the Windows zip; bump the version to cut a new release.
 
 ## Controller permissions (Linux)
 

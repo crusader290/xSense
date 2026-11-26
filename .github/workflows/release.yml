@@ -1,7 +1,12 @@
 name: release
 
+# Every push to main builds and tests on Linux + Windows. If no release exists
+# yet for the version in Cargo.toml, the Windows job creates tag v<version> on
+# that commit and publishes the Windows zip. Bump `version` in Cargo.toml to
+# cut a new release; pushes that don't bump it just produce a build artifact.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -25,21 +30,42 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked
       - run: cargo build --release --locked
+
+      - name: Work out version and whether to publish
+        id: ver
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $tag = "v$version"
+          gh release view $tag -R $env:GITHUB_REPOSITORY *> $null
+          $exists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          "tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append
+          "publish=$(-not $exists)" | Out-File $env:GITHUB_OUTPUT -Append
+          Write-Host "version $version, release exists: $exists"
+
       - name: Package
         shell: pwsh
         run: |
-          $name = "dualsense-xplane-${{ github.ref_name }}-windows-x64"
+          $name = "xsense-${{ steps.ver.outputs.tag }}-windows-x64"
           New-Item -ItemType Directory -Path $name | Out-Null
           Copy-Item target/release/dualsense-xplane.exe, config.toml, README.md, LICENSE $name
           Compress-Archive -Path "$name/*" -DestinationPath "$name.zip"
           "ZIP=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
           path: ${{ env.ZIP }}
+
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: steps.ver.outputs.publish == 'True'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: xSense ${{ steps.ver.outputs.tag }}
           files: ${{ env.ZIP }}
           generate_release_notes: true
