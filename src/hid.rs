@@ -10,7 +10,7 @@
 //! nowrep/dualsensectl, Nielk1's DS4Windows/DSX trigger-effect gist.
 
 use anyhow::{anyhow, Context, Result};
-use hidapi::{HidApi, HidDevice};
+use hidapi::{BusType, HidApi, HidDevice};
 use log::{debug, info, warn};
 
 pub const VID_SONY: u16 = 0x054c;
@@ -21,6 +21,11 @@ pub const PID_DUALSENSE_EDGE: u16 = 0x0df2;
 /// block, host-side buffer padded to 64). BT output reports are 78 bytes.
 const USB_REPORT_LEN: usize = 64;
 const BT_REPORT_LEN: usize = 78;
+
+#[cfg(windows)]
+const PERMISSION_HINT: &str = "Another app may be holding it exclusively (DS4Windows/DSX with HidHide, or Steam Input) - close it or whitelist this exe.";
+#[cfg(not(windows))]
+const PERMISSION_HINT: &str = "Do the udev rules grant access to hidraw? (see README)";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Connection {
@@ -34,57 +39,93 @@ pub struct DualSense {
     bt_seq: u8,
 }
 
-/// Effect type bytes for the adaptive trigger 11-byte descriptor.
-/// (Nielk1 TriggerEffectGenerator; dualsensectl trigger subcommands.)
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // Feedback/Vibration are Stage-4 (adaptive trigger) effects, wired in later
+/// Adaptive trigger effects, encoded as the 11-byte descriptor the DualSense
+/// expects (mode byte + 10 parameter bytes). Encodings follow Nielk1's
+/// TriggerEffectGenerator (the de facto reference used by DSX/DS4Windows):
+/// trigger travel is split into 10 zones (0 = released, 9 = fully pulled),
+/// with an active-zone bitmask in bytes 1-2 and per-zone 3-bit strengths
+/// packed little-endian into bytes 3-6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerEffect {
+    /// No resistance, no vibration.
     Off,
-    /// Constant resistance starting at `start_pos` (0-9) with `force` (0-255).
-    Feedback { start_pos: u8, force: u8 },
-    /// Simple vibration/rumble on the trigger itself.
-    Vibration { start_pos: u8, amplitude: u8, frequency: u8 },
+    /// Uniform resistance from zone `start` (0-9) to full pull, `strength` 1-8.
+    Feedback { start: u8, strength: u8 },
+    /// Independent resistance per zone, each 0 (none) to 8 (max). This is
+    /// how detents are built: a step up in resistance at a given travel.
+    MultiFeedback { strengths: [u8; 10] },
+    /// Not used by the default profiles; available for custom effects.
+    #[allow(dead_code)]
+    /// A "wall" you push through between zones `start` (2-7) and `end`
+    /// (start+1..=8), like a gun trigger break. `strength` 1-8.
+    Weapon { start: u8, end: u8, strength: u8 },
+    /// Trigger vibration from zone `start` (0-9) onward. `amplitude` 1-8,
+    /// `frequency` in Hz (1-255).
+    Vibration { start: u8, amplitude: u8, frequency: u8 },
 }
 
 impl TriggerEffect {
-    /// Serialize into the 11-byte trigger effect descriptor used at byte 11
-    /// (right) / byte 22 (left) of the common report block.
-    fn to_bytes(self) -> [u8; 11] {
+    /// Serialize into the 11-byte trigger effect descriptor used at byte 10
+    /// (right) / byte 21 (left) of the common report block.
+    pub fn to_bytes(self) -> [u8; 11] {
+        fn pack(strengths: &[u8; 10]) -> (u16, u32) {
+            let mut active: u16 = 0;
+            let mut zones: u32 = 0;
+            for (i, &s) in strengths.iter().enumerate() {
+                if s > 0 {
+                    let v = (s.min(8) - 1) as u32 & 0x07;
+                    zones |= v << (3 * i);
+                    active |= 1 << i;
+                }
+            }
+            (active, zones)
+        }
+        fn from(start: u8, strength: u8) -> [u8; 10] {
+            let mut s = [0u8; 10];
+            let strength = strength.clamp(1, 8);
+            for z in s.iter_mut().skip(start.min(9) as usize) {
+                *z = strength;
+            }
+            s
+        }
+
         let mut b = [0u8; 11];
         match self {
             TriggerEffect::Off => {
-                b[0] = 0x05; // "Off" / no-resistance mode
+                b[0] = 0x05;
             }
-            TriggerEffect::Feedback { start_pos, force } => {
-                b[0] = 0x21; // "Feedback" (constant resistance region)
-                // Bytes 1-2: 10-bit zone bitmap (which of the 10 trigger
-                // zones are "active"). Bytes 3-9: 7 force-parameter slots,
-                // one per active zone from start_pos onward. We use the
-                // simplified single-region form dualsensectl exposes: start
-                // position selects where resistance begins, force is applied
-                // uniformly from there to full extension.
-                let start = start_pos.min(9);
-                let region_bitmap: u16 = 0xFFFFu16 << start;
-                b[1] = (region_bitmap & 0xFF) as u8;
-                b[2] = ((region_bitmap >> 8) & 0xFF) as u8;
-                for (i, slot) in b[3..10].iter_mut().enumerate() {
-                    if (i as u8) >= start {
-                        *slot = force;
-                    }
-                }
+            TriggerEffect::Feedback { start, strength } => {
+                let (active, zones) = pack(&from(start, strength));
+                b[0] = 0x21;
+                b[1..3].copy_from_slice(&active.to_le_bytes());
+                b[3..7].copy_from_slice(&zones.to_le_bytes());
             }
-            TriggerEffect::Vibration { start_pos, amplitude, frequency } => {
-                b[0] = 0x26; // "Vibration"
-                let start = start_pos.min(9);
-                let region_bitmap: u16 = 0xFFFFu16 << start;
-                b[1] = (region_bitmap & 0xFF) as u8;
-                b[2] = ((region_bitmap >> 8) & 0xFF) as u8;
-                for (i, slot) in b[3..10].iter_mut().enumerate() {
-                    if (i as u8) >= start {
-                        *slot = amplitude;
-                    }
+            TriggerEffect::MultiFeedback { strengths } => {
+                let (active, zones) = pack(&strengths);
+                if active == 0 {
+                    return TriggerEffect::Off.to_bytes();
                 }
-                b[10] = frequency;
+                b[0] = 0x21;
+                b[1..3].copy_from_slice(&active.to_le_bytes());
+                b[3..7].copy_from_slice(&zones.to_le_bytes());
+            }
+            TriggerEffect::Weapon { start, end, strength } => {
+                let start = start.clamp(2, 7);
+                let end = end.clamp(start + 1, 8);
+                let zones: u16 = (1 << start) | (1 << end);
+                b[0] = 0x25;
+                b[1..3].copy_from_slice(&zones.to_le_bytes());
+                b[3] = strength.clamp(1, 8) - 1;
+            }
+            TriggerEffect::Vibration { start, amplitude, frequency } => {
+                if frequency == 0 {
+                    return TriggerEffect::Off.to_bytes();
+                }
+                let (active, zones) = pack(&from(start, amplitude));
+                b[0] = 0x26;
+                b[1..3].copy_from_slice(&active.to_le_bytes());
+                b[3..7].copy_from_slice(&zones.to_le_bytes());
+                b[9] = frequency;
             }
         }
         b
@@ -113,19 +154,26 @@ impl DualSense {
         }
         if candidates.is_empty() {
             return Err(anyhow!(
-                "no DualSense found (vid=0x{:04x}, pid=0x{:04x}/0x{:04x}). Is it paired/plugged in, and do udev rules grant access to hidraw?",
-                VID_SONY, PID_DUALSENSE, PID_DUALSENSE_EDGE
+                "no DualSense found (vid=0x{:04x}, pid=0x{:04x}/0x{:04x}). Is it paired/plugged in? {}",
+                VID_SONY,
+                PID_DUALSENSE,
+                PID_DUALSENSE_EDGE,
+                PERMISSION_HINT
             ));
         }
 
-        // hidapi on Linux doesn't expose transport directly; we detect USB vs
-        // BT by probing the device's actual input report size after opening,
-        // which differs (64 vs 78 bytes) between the two transports.
+        // Prefer hidapi's reported bus type (reliable on Windows and modern
+        // Linux). If it's unknown, fall back to probing the input report
+        // size, which differs between transports (64 vs 78 bytes).
         let mut opened: Vec<(HidDevice, Connection)> = vec![];
         for info in &candidates {
             match info.open_device(api) {
                 Ok(dev) => {
-                    let conn = detect_connection(&dev).unwrap_or(Connection::Usb);
+                    let conn = match info.bus_type() {
+                        BusType::Bluetooth => Connection::Bluetooth,
+                        BusType::Usb => Connection::Usb,
+                        _ => detect_connection(&dev).unwrap_or(Connection::Usb),
+                    };
                     debug!(
                         "found DualSense at path {:?} -> detected {:?}",
                         info.path(),
@@ -138,7 +186,7 @@ impl DualSense {
         }
 
         if opened.is_empty() {
-            return Err(anyhow!("found DualSense in enumeration but failed to open any of them (permissions? check udev rules)"));
+            return Err(anyhow!("found DualSense in enumeration but failed to open any of them. {PERMISSION_HINT}"));
         }
 
         // Pick preferred transport if present, else first available.
@@ -151,9 +199,11 @@ impl DualSense {
         Ok(Self { device, connection, bt_seq: 0 })
     }
 
-    /// Build and write one output report reflecting `state`, with the given
-    /// per-trigger effects (usually Off unless you're doing Stage 4 trigger work).
-    pub fn write(&mut self, state: OutputState, right_trigger: TriggerEffect, left_trigger: TriggerEffect) -> Result<()> {
+    /// Build and write one output report reflecting `state`. Trigger effects
+    /// are optional: `None` leaves that trigger's current effect untouched
+    /// (its valid-flag bit stays clear), so disabling trigger features in
+    /// the config never fights another app's trigger settings.
+    pub fn write(&mut self, state: OutputState, right_trigger: Option<TriggerEffect>, left_trigger: Option<TriggerEffect>) -> Result<()> {
         let report = match self.connection {
             Connection::Usb => self.build_usb_report(state, right_trigger, left_trigger),
             Connection::Bluetooth => self.build_bt_report(state, right_trigger, left_trigger),
@@ -167,10 +217,14 @@ impl DualSense {
     /// Fill the 47-byte "common" control block shared by both transports.
     /// `out[0]` here corresponds to valid_flag0 (i.e. caller writes this
     /// slice starting at the byte right after the report id).
-    fn fill_common(common: &mut [u8], state: OutputState, right_trigger: TriggerEffect, left_trigger: TriggerEffect) {
+    fn fill_common(common: &mut [u8], state: OutputState, right_trigger: Option<TriggerEffect>, left_trigger: Option<TriggerEffect>) {
         debug_assert!(common.len() >= 47);
-        // valid_flag0: bit0 = COMPATIBLE_VIBRATION, bit1 = HAPTICS_SELECT
-        common[0] = 0x03;
+        // valid_flag0: bit0 = COMPATIBLE_VIBRATION, bit1 = HAPTICS_SELECT,
+        // bit2 = RIGHT_TRIGGER_MOTOR_ENABLE, bit3 = LEFT_TRIGGER_MOTOR_ENABLE.
+        // Without bits 2/3 the controller ignores the trigger descriptors.
+        common[0] = 0x03
+            | if right_trigger.is_some() { 0x04 } else { 0 }
+            | if left_trigger.is_some() { 0x08 } else { 0 };
         // valid_flag1: enable LEDs / lightbar control paths (mirrors pydualsense's
         // broad "0x57" rather than hand-picking every bit).
         common[1] = 0x57;
@@ -183,8 +237,12 @@ impl DualSense {
         // "common" struct in the kernel (we already excluded valid_flag bytes
         // above at 0/1, so index math matches dualsensectl's layout: right
         // trigger descriptor at common[10..21], left at common[21..32]).
-        common[10..21].copy_from_slice(&right_trigger.to_bytes());
-        common[21..32].copy_from_slice(&left_trigger.to_bytes());
+        if let Some(rt) = right_trigger {
+            common[10..21].copy_from_slice(&rt.to_bytes());
+        }
+        if let Some(lt) = left_trigger {
+            common[21..32].copy_from_slice(&lt.to_bytes());
+        }
         // valid_flag2 at common[38]: nothing extra needed for classic rumble v1.
         common[38] = 0x00;
         // player LEDs at common[43], lightbar RGB at common[44..47]
@@ -194,11 +252,11 @@ impl DualSense {
         common[46] = state.lightbar.2;
     }
 
-    fn build_usb_report(&self, state: OutputState, rt: TriggerEffect, lt: TriggerEffect) -> Vec<u8> {
+    fn build_usb_report(&self, state: OutputState, rt: Option<TriggerEffect>, lt: Option<TriggerEffect>) -> Vec<u8> {
         build_usb_report_raw(state, rt, lt)
     }
 
-    fn build_bt_report(&mut self, state: OutputState, rt: TriggerEffect, lt: TriggerEffect) -> Vec<u8> {
+    fn build_bt_report(&mut self, state: OutputState, rt: Option<TriggerEffect>, lt: Option<TriggerEffect>) -> Vec<u8> {
         self.bt_seq = self.bt_seq.wrapping_add(1) & 0x0f;
         build_bt_report_raw(state, rt, lt, self.bt_seq)
     }
@@ -206,7 +264,7 @@ impl DualSense {
 
 /// Free function version of USB report construction, independent of an open
 /// device, so it's directly unit-testable.
-pub fn build_usb_report_raw(state: OutputState, rt: TriggerEffect, lt: TriggerEffect) -> Vec<u8> {
+pub fn build_usb_report_raw(state: OutputState, rt: Option<TriggerEffect>, lt: Option<TriggerEffect>) -> Vec<u8> {
     let mut report = vec![0u8; USB_REPORT_LEN];
     report[0] = 0x02;
     DualSense::fill_common(&mut report[1..1 + 47], state, rt, lt);
@@ -215,7 +273,7 @@ pub fn build_usb_report_raw(state: OutputState, rt: TriggerEffect, lt: TriggerEf
 
 /// Free function version of BT report construction (see above). `seq` is the
 /// 4-bit rolling sequence counter the caller manages.
-pub fn build_bt_report_raw(state: OutputState, rt: TriggerEffect, lt: TriggerEffect, seq: u8) -> Vec<u8> {
+pub fn build_bt_report_raw(state: OutputState, rt: Option<TriggerEffect>, lt: Option<TriggerEffect>, seq: u8) -> Vec<u8> {
     let mut report = vec![0u8; BT_REPORT_LEN];
     report[0] = 0x31;
     report[1] = seq << 4;
@@ -246,7 +304,7 @@ mod tests {
     #[test]
     fn usb_report_has_correct_length_and_ids() {
         let out = OutputState { motor_left: 200, motor_right: 100, lightbar: (10, 20, 30), player_leds: 0b100 };
-        let r = build_usb_report_raw(out, TriggerEffect::Off, TriggerEffect::Off);
+        let r = build_usb_report_raw(out, None, None);
         assert_eq!(r.len(), USB_REPORT_LEN);
         assert_eq!(r[0], 0x02, "USB report id must be 0x02");
         // valid_flag0 at r[1], motor_right at r[3], motor_left at r[4]
@@ -260,7 +318,7 @@ mod tests {
     #[test]
     fn bt_report_has_correct_length_header_and_crc() {
         let out = OutputState { motor_left: 50, motor_right: 75, lightbar: (0, 0, 0), player_leds: 0 };
-        let r = build_bt_report_raw(out, TriggerEffect::Off, TriggerEffect::Off, 3);
+        let r = build_bt_report_raw(out, None, None, 3);
         assert_eq!(r.len(), BT_REPORT_LEN);
         assert_eq!(r[0], 0x31, "BT report id must be 0x31");
         assert_eq!(r[1], 3 << 4, "seq_tag byte wrong");
@@ -278,15 +336,43 @@ mod tests {
     }
 
     #[test]
-    fn trigger_feedback_encodes_force_from_start_position() {
-        let bytes = TriggerEffect::Feedback { start_pos: 3, force: 200 }.to_bytes();
-        assert_eq!(bytes.len(), 11);
-        assert_eq!(bytes[0], 0x21);
-        // force slots live at bytes[3..10] (7 zones); zones before start_pos
-        // stay 0, zones from start_pos onward carry the force value.
-        assert_eq!(bytes[3], 0, "zone 0 should be untouched");
-        assert_eq!(bytes[3 + 3], 200, "zone 3 == start_pos should carry force");
-        assert_eq!(bytes[9], 200, "zone 6, last force slot, should carry force");
+    fn feedback_matches_nielk1_encoding() {
+        // Feedback(position=3, strength=8): zones 3..=9 active, each 3-bit
+        // value 7, packed little-endian.
+        let b = TriggerEffect::Feedback { start: 3, strength: 8 }.to_bytes();
+        assert_eq!(b[0], 0x21);
+        let active = u16::from_le_bytes([b[1], b[2]]);
+        assert_eq!(active, 0b11_1111_1000);
+        let zones = u32::from_le_bytes([b[3], b[4], b[5], b[6]]);
+        for z in 0..10 {
+            let v = (zones >> (3 * z)) & 7;
+            assert_eq!(v, if z >= 3 { 7 } else { 0 }, "zone {z}");
+        }
+        assert!(b[7..].iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn multi_feedback_encodes_per_zone() {
+        let b = TriggerEffect::MultiFeedback { strengths: [1, 1, 1, 1, 1, 1, 1, 1, 6, 6] }.to_bytes();
+        assert_eq!(b[0], 0x21);
+        assert_eq!(u16::from_le_bytes([b[1], b[2]]), 0x3FF);
+        let zones = u32::from_le_bytes([b[3], b[4], b[5], b[6]]);
+        assert_eq!((zones >> 21) & 7, 0, "zone 7 strength 1 -> 0");
+        assert_eq!((zones >> 24) & 7, 5, "zone 8 strength 6 -> 5");
+        assert_eq!((zones >> 27) & 7, 5, "zone 9 strength 6 -> 5");
+    }
+
+    #[test]
+    fn weapon_and_vibration_layout() {
+        let w = TriggerEffect::Weapon { start: 4, end: 6, strength: 8 }.to_bytes();
+        assert_eq!(w[0], 0x25);
+        assert_eq!(u16::from_le_bytes([w[1], w[2]]), (1 << 4) | (1 << 6));
+        assert_eq!(w[3], 7);
+
+        let v = TriggerEffect::Vibration { start: 0, amplitude: 8, frequency: 20 }.to_bytes();
+        assert_eq!(v[0], 0x26);
+        assert_eq!(u16::from_le_bytes([v[1], v[2]]), 0x3FF);
+        assert_eq!(v[9], 20, "frequency lives at byte 9");
     }
 
     #[test]
@@ -294,6 +380,19 @@ mod tests {
         let bytes = TriggerEffect::Off.to_bytes();
         assert_eq!(bytes[0], 0x05);
         assert!(bytes[1..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn trigger_valid_flags_follow_option() {
+        let r = build_usb_report_raw(OutputState::default(), None, None);
+        assert_eq!(r[1], 0x03, "no trigger bits when triggers unmanaged");
+        let fx = TriggerEffect::Feedback { start: 0, strength: 4 };
+        let r = build_usb_report_raw(OutputState::default(), Some(fx), None);
+        assert_eq!(r[1], 0x07);
+        assert_eq!(&r[11..22], &fx.to_bytes(), "right trigger at common[10..21]");
+        let r = build_usb_report_raw(OutputState::default(), None, Some(fx));
+        assert_eq!(r[1], 0x0B);
+        assert_eq!(&r[22..33], &fx.to_bytes(), "left trigger at common[21..32]");
     }
 }
 

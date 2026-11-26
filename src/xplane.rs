@@ -60,11 +60,19 @@ impl XPlaneClient {
         Ok(())
     }
 
-    pub fn subscribe_all(&self, subs: &[(&str, i32, i32)]) -> Result<()> {
+    pub fn subscribe_all(&self, subs: &[(String, i32, i32)]) -> Result<()> {
         for (dref, index, freq) in subs {
             self.subscribe(dref, *index, *freq)?;
         }
         Ok(())
+    }
+
+    /// Ask X-Plane to stop streaming everything (freq = 0), so it doesn't
+    /// keep sending to a dead port after we exit.
+    pub fn unsubscribe_all(&self, subs: &[(String, i32, i32)]) {
+        for (dref, index, _) in subs {
+            let _ = self.subscribe(dref, *index, 0);
+        }
     }
 
     /// Block (up to the configured read timeout) for one UDP datagram and

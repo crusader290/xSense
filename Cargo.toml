@@ -1,8 +1,8 @@
 [package]
 name = "dualsense-xplane"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "X-Plane 12 -> DualSense haptics daemon (runway rumble, touchdown thump, stall buffet, turbulence)"
+description = "X-Plane 12 -> DualSense haptics daemon for Linux and Windows (rumble, adaptive triggers, lightbar)"
 authors = ["Abdullah Waqar"]
 
 [[bin]]
@@ -10,7 +10,7 @@ name = "dualsense-xplane"
 path = "src/main.rs"
 
 [dependencies]
-hidapi = { version = "2.6", default-features = false, features = ["linux-static-hidraw"] }
+hidapi = { version = "2.6", default-features = false }
 crc32fast = "1.4"
 serde = { version = "1", features = ["derive"] }
 toml = "0.5"
@@ -18,6 +18,15 @@ anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
 ctrlc = "3.4"
+
+# Per-platform HID backends. Linux talks to hidraw directly; Windows uses
+# hidapi's pure-Rust native backend (no C toolchain needed, and it always
+# sizes WriteFile buffers to the device's OutputReportByteLength).
+[target.'cfg(target_os = "linux")'.dependencies]
+hidapi = { version = "2.6", default-features = false, features = ["linux-static-hidraw"] }
+
+[target.'cfg(windows)'.dependencies]
+hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
 
 [profile.release]
 opt-level = 2

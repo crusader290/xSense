@@ -20,6 +20,11 @@ local_port = 52010
 # first DualSense found, whichever transport it's on.
 connection = "bluetooth"
 
+# Optional: force the stall angle of attack (degrees). Leave commented out to
+# use each aircraft's own stall-warning AoA (acf_stall_warn_alpha), falling
+# back to 14 degrees if the aircraft doesn't define one.
+# stall_alpha_deg = 14.0
+
 # Effect mixer tick rate. 60 Hz matches typical HID polling; the DualSense's
 # actuators can't usefully resolve much faster than this anyway.
 tick_hz = 60
@@ -34,3 +39,25 @@ gear_flap = 0.4        # bump on gear/flap position change
 engine_rumble = 0.0    # OFF by default -- constant idle hum reads as "broken controller,"
                        # not immersive. Set > 0 only if you specifically want it; it's
                        # gated to N1 > 60% so it won't hum at idle even when enabled.
+speedbrake_buffet = 0.5  # spoiler/speedbrake buffet, deployment x airspeed^2
+surface_rough = 0.35   # extra irregular bumps on grass/dirt/gravel; hull slap on water
+gear_buffet = 0.25     # airframe rumble with gear down in flight, scales with airspeed
+engine_start = 0.6     # one-shot shove on engine light-off, softer shudder on shutdown
+rotor_beat = 0.25      # helicopters only: pulses at the main rotor's once-per-rev rate
+prop_beat = 0.0        # fixed-wing prop hum, OFF by default (same reason as engine_rumble)
+ap_disconnect = 0.6    # double tap when the autopilot servos disengage
+config_overspeed = 0.6 # pulsing buzz when over flap (Vfe) or gear (Vle) limit speed
+nose_touchdown = 0.6   # lighter thump when the nose/tail wheel comes down after the mains
+
+# Adaptive triggers. Zones are trigger travel: 0 = released, 9 = fully pulled.
+# Detents only line up with throttle settings if R2 is bound to the throttle
+# axis (and L2 to brakes) in X-Plane's joystick settings.
+[triggers]
+enabled = true                # master switch; false = never touch the triggers
+throttle = true               # R2: light resistance, then a resistance step (detent)
+throttle_detent_zone = 8      # 1-9, where the detent starts (8 ~ climb/TOGA gate)
+throttle_detent_strength = 6  # 1-8, resistance past the detent
+reverse_buzz = true           # R2 buzzes while thrust reversers are deployed
+brakes = true                 # L2: firmer with groundspeed, locked with parking brake set
+stall_shaker = true           # both triggers shake on stall warning
+stall_shaker_hz = 20
